@@ -1,0 +1,322 @@
+import pandas as pd
+from pandas import Series, DataFrame
+import numpy as np
+import xlrd
+import matplotlib.pyplot as plt
+from sklearn.linear_model import LinearRegression
+import seaborn as sns
+import openpyxl as pxl
+from openpyxl.styles import Alignment, Font
+from openpyxl.cell import Cell
+
+"""
+1. This programme collects the recorded absorbance values of a 96-well plate and stores it into a Dataframe.
+2. Arrays are created for absorbance values of standards and test samples.
+3. The absorbance values of standards are blank subtracted, averaged and plotted against known concs
+   to obtain a calibration curve, slope, intercept and R-square values.
+4. The concentrations of the test samples are calculated using the slope and intercept values.
+5. The test samples that need to be repeated are determined by comparing the absorbance values
+   against the blank absorbance and the highest standard absorbance.
+6. The percentage variation of the Indirect ELISA results in question in comparison to HPLC is calculated
+   and the results are elucidated using a bar chart.
+7. The analysed data is written into a separate excel sheet of the same workbook which contains the raw data
+   replete with graphs. 
+"""
+def main():
+    plate_array = get_raw_table()
+    (stds, blks, test) = stds_blks_test(plate_array)
+    blk_avg = get_avg_of_one_row_array(blks)
+    sat_avg = get_avg_of_one_row_array(stds[0])
+    (blk_sub_stds, blk_sub_test) = blk_sub_std_and_test(stds, test, blk_avg)
+    (avg_std) = get_avg_of_multi_row_array(blk_sub_stds)
+    (r_sq, m, c, std_concs) = get_calib_curve(avg_std)
+    unknown_conc = predict_test(blk_sub_test, m, c)
+    HPLC_data = get_HPLC_data()
+    percent_rel_diff = rel_diff(unknown_conc, HPLC_data)
+    (test_ID, bars) = get_bars(percent_rel_diff)
+    (lower_dilution_factor, higher_dilution_factor) = get_samples_to_be_repeated(blk_avg, sat_avg, test, test_ID)
+    write_stds_to_excel(stds, blk_sub_stds, avg_std, std_concs)
+    write_calib_curve_to_excel(r_sq, m, c)
+    write_test_to_excel(test, blk_sub_test, test_ID, unknown_conc, HPLC_data, percent_rel_diff)
+    write_repeat_samples_to_excel(lower_dilution_factor, higher_dilution_factor, blk_avg, sat_avg)
+    embed_graphs_in_excel()
+    
+"""
+Collects raw absorbance values from excel sheet and stores into a sheet
+"""
+def get_raw_table():
+    raw_plate = pd.ExcelFile(r'D:\Work\Perfect Day Foods\Experimental Records\DummyData.xlsx')
+    plate_df = pd.read_excel(raw_plate, header=2, usecols='C:N')
+    plate_df = plate_df[0:8]
+    plate_array = np.array(plate_df)
+    return plate_array
+
+"""
+Collects absorbance values of standard solutions, blank solutions, and test samples into
+separate arrays. 
+"""
+def stds_blks_test(plate_array):
+    stds = plate_array[:8, :3]
+    blks = stds[7]
+    test = plate_array[:8, 3:6]
+    return (stds, blks, test)
+
+"""
+Gets the average of elements belonging to a single row array and returns the average
+value as a float.
+"""
+def get_avg_of_one_row_array(array):
+    total = 0
+    avg = 0
+    for elem in array:
+        total += elem
+    avg = (total)/(len(array))
+    return avg
+
+"""
+Subtracts the blank value from the standrds and tests.
+"""
+def blk_sub_std_and_test(stds, test, blk_avg):
+    blk_sub_stds = stds - blk_avg
+    blk_sub_test = test - blk_avg
+    return (blk_sub_stds, blk_sub_test)
+
+"""
+Gets the average of elements belonging to a multi-row array and returns an array with the
+element in each row giving the average of elements in that given row of the multi-row array. 
+"""
+def get_avg_of_multi_row_array(array):
+    avg_array = []
+    for elem in array:
+        one_row = elem
+        avg = get_avg_of_one_row_array(one_row)
+        avg_array.append(avg)
+    avg_array = np.array(avg_array)
+    return (avg_array)
+
+"""
+Plots standard concentrations against the averaged blank-subtracted absorbance values,
+obtains a calibration curve and returns m, c and R-squared values.
+"""
+def get_calib_curve(avg_std):
+    std_concs = np.array([400, 200, 100, 50, 25, 12.5, 6.25, 0])
+    std_concs = std_concs.reshape((-1, 1))
+    sns.set_theme(color_codes=False)
+    calib_curve = plt.figure()
+    calib_curve = calib_curve.add_subplot(1, 1, 1)
+    sns.regplot(x=std_concs, y=avg_std)
+    calib_curve.set_xlabel('Conc of Hibiscus (ng/mL)', fontsize='large')
+    calib_curve.set_ylabel('Absorbance at 650nm', fontsize='large')
+    calib_curve.set_title('Indirect ELISA Calibration Curve for Hibiscus', fontsize='large')
+    plt.savefig(r'D:\Work\Perfect Day Foods\Experimental Records\Calibration Curve.png', dpi=400, bbox_inches='tight')
+    linear_reg = LinearRegression().fit(std_concs, avg_std)
+    r_sq = linear_reg.score(std_concs, avg_std)
+    c = linear_reg.intercept_
+    m = linear_reg.coef_
+    return (r_sq, m, c, std_concs)
+
+"""
+Calculates the unknown concentrations of the test samples by employing
+the previously obtained slope and intercept values. 
+"""
+def predict_test(blk_sub_test, m, c):
+    unknown_conc = (blk_sub_test - c)/ m
+    unknown_conc_avg = []
+    for elem in unknown_conc:
+        one_row = elem
+        total = 0
+        avg = 0
+        for elem in one_row:
+            total += elem
+        avg = (total)/(len(one_row))
+        unknown_conc_avg.append(avg)
+    unknown_conc_avg = np.array(unknown_conc_avg)
+    return (unknown_conc_avg)
+
+"""
+Obtains the samples to be repeated with a different dilution factor by comparing
+the absorbance values of the test samples against the blank and the highest standard
+absorbance values. 
+"""
+def get_samples_to_be_repeated(blk_avg, sat_avg, test, test_ID):
+    lower_dilution_factor = {}
+    higher_dilution_factor = {}
+    (test_avg) = get_avg_of_multi_row_array(test)
+    dict_triplicate = dict(zip(test_ID, test))
+    dict_avg = dict(zip(test_ID, test_avg))
+    for key in dict_avg:
+        if dict_avg[key] <= blk_avg:
+            lower_dilution_factor[key] = dict_avg[key]
+        elif dict_avg[key] >= sat_avg:
+            higher_dilution_factor[key] = dict_avg[key]
+    return(lower_dilution_factor, higher_dilution_factor)
+
+"""
+Collects the HPLC data and stores it into an array. 
+"""
+def get_HPLC_data():
+    raw_data = pd.ExcelFile(r'D:\Work\Perfect Day Foods\Experimental Records\DummyData.xlsx')
+    HPLC_data = pd.read_excel(raw_data, header=2, usecols='O')
+    HPLC_data = HPLC_data[0:8]
+    HPLC_data = np.array(HPLC_data)
+    return HPLC_data
+
+"""
+The relative difference in protein concentration calculated from ELISA and HPLC is calculated.
+"""
+def rel_diff(unknown_conc, HPLC_data):
+    unknown_conc = unknown_conc.reshape((-1, 1))
+    percent_rel_diff = ((unknown_conc - HPLC_data)/(unknown_conc))*100
+    return percent_rel_diff
+
+"""
+The relative difference is elucidated using a bar chart.
+"""
+def get_bars(percent_rel_diff):
+    test_ID = ['Test 1', 'BG12', 'HC', 'TYH66','JK90', 'JH90', 'IK67', 'HJ44']
+    df = DataFrame(percent_rel_diff, index = test_ID, columns=['Percentage relative difference'])
+    bars = df.plot(kind='barh', color = 'k')
+    bars.set_xlabel('% Relative Difference between HPLC results and Indirect ELISA Results', fontsize='large')
+    bars.set_ylabel('Sample ID', fontsize='large')
+    bars.set_title('How well does HPLC data correlate with Indirect ELISA?', fontsize='large')
+    plt.savefig(r'D:\Work\Perfect Day Foods\Experimental Records\HPLC Data Comparison.png', dpi=400, bbox_inches='tight')
+    return (test_ID, bars)
+
+"""
+The raw absorbance values, blank subtracted values and the blank subtracted, averaged values
+of standard solutions is written into a new excel sheet of the same workbook that originally
+contains the raw data of the 96-well plate. 
+"""
+def write_stds_to_excel(stds, blk_sub_stds, avg_std, std_concs):
+    avg_std = avg_std.reshape((8,1))  
+    table_1 = np.concatenate([stds, blk_sub_stds], axis=1)
+    table_2 = np.concatenate([std_concs, avg_std], axis=1)
+    table_1_df = DataFrame(table_1, index = [1, 2, 3, 4, 5, 6, 7, 8], columns=['Replicate 1', 'Replicate 2', 'Replicate 3',
+                                                                               'Replicate 1', 'Replicate 2', 'Replicate 3'])
+    table_1_df.index.name = 'SL. No'
+    table_2_df = DataFrame(table_2, index = [1, 2, 3, 4, 5, 6, 7, 8], columns=['Standard Concentrations (ng/mL)',
+                                                                               'Blank corrected Avg Absorbance at 650nm'])
+    table_2_df.index.name = 'SL. No'
+    DummyData = pxl.load_workbook(r'D:\Work\Perfect Day Foods\Experimental Records\DummyData.xlsx')
+    with pd.ExcelWriter(r'D:\Work\Perfect Day Foods\Experimental Records\DummyData.xlsx', engine='openpyxl') as writer:
+        writer.book = DummyData
+        writer.sheets = {
+            worksheet.title: worksheet
+            for worksheet in DummyData.worksheets
+        }
+        table_1_df.to_excel(writer, sheet_name='Analysis', index=True, startrow=2, startcol=1)
+        table_2_df.to_excel(writer, sheet_name='Analysis', index=True, startrow=2, startcol=9)
+        analysis = DummyData['Analysis']
+        analysis.merge_cells('C2:E2')
+        analysis.merge_cells('F2:H2')
+        analysis['C2']='Absorbance at 650nm'
+        analysis['F2']='Blank subtracted abs'
+        analysis_C2 = analysis['C2']
+        analysis_F2 = analysis['F2']
+        analysis_C2.font = Font(size=12, bold=True, italic=True)
+        analysis_F2.font = Font(size=12, bold=True, italic=True)
+    writer.save()
+
+"""
+The slope, intercept and the R-square values obtained from the calibration curve is written
+into the Excel sheet.
+"""
+def write_calib_curve_to_excel(r_sq, m, c):
+    data = {'m': [m],
+            'c': [c],
+            'R-Sqr': [r_sq]}
+    table_3 = DataFrame(data)
+    DummyData = pxl.load_workbook(r'D:\Work\Perfect Day Foods\Experimental Records\DummyData.xlsx')
+    with pd.ExcelWriter(r'D:\Work\Perfect Day Foods\Experimental Records\DummyData.xlsx', engine='openpyxl') as writer:
+        writer.book = DummyData
+        writer.sheets = {
+            worksheet.title: worksheet
+            for worksheet in DummyData.worksheets
+        }
+        table_3.to_excel(writer, sheet_name='Analysis', index=False, startrow=2, startcol=13)
+        analysis = DummyData['Analysis'] 
+    writer.save()
+
+"""
+The raw absorbance values, blank subtracted values of the test samples is written into
+the excel sheet.   
+"""
+def write_test_to_excel(test, blk_sub_test, test_ID, unknown_conc, HPLC_data, percent_rel_diff):
+    test_ID = np.array(test_ID)
+    test_ID = test_ID.reshape((-1, 1))
+    unknown_conc = unknown_conc.reshape((-1, 1))
+    table_4 = np.concatenate([test, blk_sub_test], axis=1)
+    table_5 = np.concatenate([test_ID, unknown_conc, HPLC_data, percent_rel_diff], axis=1)
+    table_4_df = DataFrame(table_4, index =[1, 2, 3, 4, 5, 6, 7, 8], columns = ['Replicate 1', 'Replicate 2', 'Replicate 3',
+                                                                               'Replicate 1', 'Replicate 2', 'Replicate 3'])
+    table_5_df = DataFrame(table_5, index = [1, 2, 3, 4, 5, 6, 7, 8], columns = ['Test_ID', 'Unknown Concentration (ng/mL)',
+                                                                                 'HPLC Data', 'Percentage Relative Difference'])
+    table_4_df.index.name = 'SL No.'
+    table_5_df.index.name = 'SL No.'
+    DummyData = pxl.load_workbook(r'D:\Work\Perfect Day Foods\Experimental Records\DummyData.xlsx')
+    with pd.ExcelWriter(r'D:\Work\Perfect Day Foods\Experimental Records\DummyData.xlsx', engine='openpyxl') as writer:
+        writer.book = DummyData
+        for worksheet in DummyData.worksheets:
+            writer.sheets = {worksheet.title: worksheet}
+        table_4_df.to_excel(writer, sheet_name='Analysis', index=True, startrow=13, startcol=1)
+        table_5_df.to_excel(writer, sheet_name='Analysis', index=True, startrow=13, startcol=9)
+        analysis = DummyData['Analysis']
+        analysis.merge_cells('C13:E13')
+        analysis.merge_cells('F13:H13')
+        analysis['C13']='Absorbance at 650nm'
+        analysis['F13']='Blank subtracted abs'
+        analysis_C13 = analysis['C13']
+        analysis_F13 = analysis['F13']
+        analysis_C13.font = Font(size=12, bold=True, italic=True)
+        analysis_F13.font = Font(size=12, bold=True, italic=True)
+    writer.save()
+
+"""
+The samples that need to be repeated with a different dilution factor (higher or lower)
+is written into the excel sheet.
+"""
+def write_repeat_samples_to_excel(lower_dilution_factor, higher_dilution_factor, blk_avg, sat_avg):
+    low_df = {'Samples to be repeated with a lower DF': list(lower_dilution_factor.keys()), 'Average Absorbance': list(lower_dilution_factor.values())}                                                                                 
+    high_DF = {'Samples to be repeated with a higher DF': list (higher_dilution_factor.keys()), 'Average Absorbance': list(higher_dilution_factor.values())}
+    upper_lower_limit = {'Blank Avg': blk_avg, 'Highest Std Abs Avg': sat_avg} 
+    upper_lower_limit_df = DataFrame(upper_lower_limit, index = [0])                                      
+    DummyData = pxl.load_workbook(r'D:\Work\Perfect Day Foods\Experimental Records\DummyData.xlsx')
+    with pd.ExcelWriter(r'D:\Work\Perfect Day Foods\Experimental Records\DummyData.xlsx', engine='openpyxl') as writer:
+        writer.book = DummyData
+        for worksheet in DummyData.worksheets:
+            writer.sheets = {worksheet.title: worksheet}
+        upper_lower_limit_df.to_excel(writer, sheet_name='Analysis', index=False, startrow=24, startcol=1) 
+        if len(lower_dilution_factor)!=0:
+            lower_dilution_factor_df = DataFrame(low_df)
+            lower_dilution_factor_df.to_excel(writer, sheet_name='Analysis', index=False, startrow=24, startcol=5)
+        if len(higher_dilution_factor)!=0:
+            higher_dilution_factor_df = DataFrame(high_DF)                                     
+            higher_dilution_factor_df.to_excel(writer, sheet_name='Analysis', index=False, startrow=24, startcol=9) 
+        analysis = DummyData['Analysis']
+        for row in analysis.iter_rows():  
+            for cell in row:      
+                cell.alignment = Alignment(wrap_text=True)
+    writer.save()
+
+"""
+The calibration curve and bar chart are embedded into the excel sheet. 
+"""
+def embed_graphs_in_excel():
+    DummyData = pxl.load_workbook(r'D:\Work\Perfect Day Foods\Experimental Records\DummyData.xlsx')
+    analysis = DummyData['Analysis']
+    calib_curve = pxl.drawing.image.Image(r'D:\Work\Perfect Day Foods\Experimental Records\Calibration Curve.png')
+    HPLC_bars = pxl.drawing.image.Image(r'D:\Work\Perfect Day Foods\Experimental Records\HPLC Data Comparison.png')
+    calib_curve.width = 600
+    calib_curve.height = 350
+    calib_curve.anchor = 'R2' 
+    analysis.add_image(calib_curve)
+    HPLC_bars.width = 600
+    HPLC_bars.height = 350
+    HPLC_bars.anchor = 'R14' 
+    analysis.add_image(HPLC_bars)
+    DummyData.save(r'D:\Work\Perfect Day Foods\Experimental Records\DummyData.xlsx')
+    
+                    
+if __name__ == "__main__":
+    main()
+
